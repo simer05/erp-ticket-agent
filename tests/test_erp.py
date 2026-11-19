@@ -131,3 +131,9 @@ def test_date_mentions():
     assert mentions("paid on or after November 28, 2026", "2026-11-28")
     assert mentions("due 28 November 2026", "2026-11-28")
     assert not mentions("due 29 November 2026", "2026-11-28")
+
+
+def test_not_found_says_what_the_id_is():
+    r = kestrel().get_invoice("BR-13")
+    assert "not found" in r["error"] and r["hint"] == "BR-13 is a reconciliation item; read it with get_reconciliation_item"
+    assert "hint" not in lumen().get_invoice("XX-999")

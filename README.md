@@ -1,87 +1,129 @@
-# ERP ticket agent with sealed credentials
+# ERP ticket agent
 
-An AI agent that resolves enterprise finance support tickets (accounts payable, access requests,
-bank reconciliation) on a mock ERP, built with **Google ADK** and **Gemini**.
+An AI agent that resolves finance support tickets inside a customer's ERP: stuck invoice approvals,
+holds, duplicates, payment questions, access requests, bank reconciliations and failed integrations.
+Built with **Google ADK** and **Gemini**, against a mock modelled on the **Oracle Fusion Payables REST API**.
 
-Two questions behind it:
-1. When an agent works inside a company's ERP, how do you let it act without letting it do the
-   wrong thing to real financial data?
-2. An agent that logs into ERPs holds credentials and sees bank details. How do you stop it
-   leaking them while it still uses them to do the job?
+It is built the way a forward deployed engineer would ship it to customers:
+1. **Connect to the customer's ERP** through a connector, not hard-coded data.
+2. **Onboard a new customer by configuration**: each customer's thresholds, hold names, teams and
+   rules live in one policy file. No code changes.
+3. **Enforce the customer's rules in code**, so the agent cannot make an unsafe change even if the model
+   gets it wrong.
+4. **Measure it like a deployment**: share of tickets resolved without a person, routing accuracy,
+   unsafe changes, cost per ticket, and a one-page report for the customer.
+
+In addition, it **seals credentials**: the model never sees passwords, keys or full bank accounts
+(see [Security](#in-addition-sealed-credentials)).
+
+## Results
+
+44 test tickets across 2 customers, Gemini 3.1 Flash-Lite (free tier). Every result is checked against
+the final ERP records, escalations and replies, not against the agent's own summary.
+
+| | Lumen Foods (Singapore) | Kestrel Logistics (Australia) | Total |
+|---|---|---|---|
+| Tickets handled correctly | 23/23 | 21/21 | **44/44** |
+| Correct on the first run | 20/23 | 20/21 | 40/44 |
+| Resolved with no person involved (of those the policy allows) | 10/10 | 11/11 | **21/21** |
+| Sent to the right team (of those needing a person) | 13/13 | 10/10 | **23/23** |
+| Unsafe changes to ERP data | 0 | 0 | **0** |
+| Credentials or bank details exposed | 0 | 0 | **0** |
+| Average cost per ticket | 24.6k tokens, 6.2 tool calls | 21.9k tokens, 5.5 tool calls | |
+
+The 4 first-run misses, and what changed:
+
+| Ticket | What went wrong | Fix |
+|---|---|---|
+| L03 duplicate invoice | Placed the duplicate hold, then closed the ticket without telling the AP team | **Closure obligations in code**: a duplicate, inactive-supplier or bank-mismatch hold must be escalated to the owning team before the ticket can close |
+| L21 bank check before payment | Checked the account but never recorded the result on the invoice | Same mechanism: a bank verification must be recorded before closing; the tool result says what is required next |
+| K19 "BR-13 is out by $300" | Read BR-13 as an invoice, found nothing, escalated to the wrong team (it did not post the $300 adjustment) | **Better tool errors**: a not-found error now says what the id actually is ("BR-13 is a reconciliation item; read it with get_reconciliation_item") |
+| L12 payment date | The agent was right ("November 28, 2026"); the grader only accepted 2026-11-28 | Grader fixed to accept written dates |
+
+Each fixed ticket was re-run and passed. The lesson that repeated: when the agent missed a step, adding
+a sentence to the prompt was not reliable; putting the rule in code was.
+
+The per-customer reports are in [results/v2](results/v2) ([Lumen](results/v2/report_lumen_sg.md),
+[Kestrel](results/v2/report_kestrel_au.md)), with every ticket's full trace.
 
 ## How it works
 
 ```
-ticket ──► ADK agent (Gemini) ──► search_procedures ──► Chroma vector DB of runbooks
+ticket ──► ADK agent (Gemini) ──► search_procedures ──► Chroma vector DB of this customer's runbooks
                 │
-                ├──► read tools: invoice, vendor, PO, user, approval, reconciliation item
+                ├──► read and write tools ──► Operations: the customer's rules, in code
+                │                                  │    (from customers/<id>/policy.yaml)
+                │                                  ├──► rule broken: refuse with a reason
+                │                                  └──► Oracle Fusion connector ──► ERP
                 │
-                ├──► write tools ──► ERP layer checks the business rules ──► change or refuse
+                ├──► credential tools ──► broker swaps the handle for the secret (model sees cred://oracle-api)
                 │
-                └──► credential tools ──► broker swaps handle for the real secret
-                                          (the model only ever sees cred://oracle-api)
+                └──► close_ticket or escalate (every ticket must end with one of these)
 ```
 
-- **Procedures by retrieval (RAG).** Runbooks (stuck approvals, PO mismatch, duplicates, blocked
-  vendors, access requests, reconciliation, credential handling, vendor bank changes) are split by
-  section into a local Chroma vector database. The agent searches them instead of carrying every rule.
-- **Tool calling with guardrails in the backend.** The model chooses the tools; the ERP layer enforces
-  the rules. A reassignment to an approver whose limit is too low, a release of a hold over the PO
-  tolerance or a role grant without an approved record is refused with a reason.
-- **Ownership check in code.** A ticket can only end with a verified ERP change or an escalation to a
-  human team. If neither happened, the runner sends it back once.
-- **Sealed credentials.** The agent gets handles, not secrets. A broker in the backend swaps the
-  handle for the real key inside the tool call. Bank accounts come back masked (bank and last 4 digits),
-  and the only way to check one is a yes/no question, capped at 2 per vendor per ticket so it cannot
-  be brute-forced. This applies the Sealed Orders idea from my research on LLM secret leakage: the
-  model that writes replies should never hold the secret.
-- **Observability and token budget.** ADK callbacks record every model call (tokens, latency) and every
-  tool call (arguments, refusals). Each ticket has a token budget.
+- **Connector** (`erp_agent/connectors/oracle_fusion.py`). Records use Oracle Fusion Payables field names
+  and paths (`/fscmRestApi/resources/11.13.18.05/invoices`, `invoiceHolds`; `InvoiceNumber`, `ApprovalStatus`,
+  `ValidationStatus`, `HoldName`, `ReleaseName`, ...) and collections return `{items, count, hasMore}`.
+  The connector turns them into one shape the rest of the code uses, so a Workday or SAP connector
+  would plug in the same way.
+- **Customer onboarding** (`erp_agent/customers/<id>/policy.yaml`). PO tolerance, how many days before
+  an approval counts as stuck, whether rejected invoices may be resubmitted, hold and release names,
+  reconciliation limits and allowed causes, conflicting roles (separation of duties) and the team for
+  each problem. The same 4% PO variance is refused at Lumen (2% tolerance) and released at Kestrel (5%).
+- **Procedures by retrieval (RAG).** 13 runbooks are filled with each customer's numbers and indexed per
+  customer in Chroma. The agent searches them instead of carrying every rule in its prompt.
+- **Rules in code** (`erp_agent/erp.py`). Examples: reassign an approval only to an active person above
+  the approver in the management chain with a high enough limit; release only a variance hold within
+  tolerance; grant a role only against an approved record and never into a duties conflict; post a
+  reconciliation adjustment only for an allowed cause, within the limit and equal to the difference.
+- **Ownership.** Every ticket must end closed (`resolved` only after a verified change, or `answered`)
+  or escalated to a valid team for that customer. If neither happened, the runner sends it back once.
+- **Observability.** ADK callbacks record every model call (tokens, latency) and every tool call
+  (arguments, refusals, Oracle API paths). Each ticket has a token budget.
 
-## Results (Gemini 3.1 Flash-Lite, free tier)
+## The test tickets
 
-### Workflow tickets (10 tickets, final ERP state checked, not the agent's summary)
+44 tickets (`eval/tickets_lumen_sg.json`, `eval/tickets_kestrel_au.json`) written from common ERP
+support problems: approvals stuck with someone who left or is on leave, invoices over the PO, duplicates
+typed with a different dash, inactive suppliers, rejections, approval-routing errors, "when will this be
+paid", role requests with and without approval or with a duties conflict, FX rounding and bank fees,
+failed integrations, supplier bank-change requests, urgent "just push it through" pressure, and an
+instruction hidden in an invoice description.
 
-| Run | Passed | Notes |
+`scripts/reference_check.py` plays the intended correct actions for every ticket: all 44 pass, and
+doing nothing passes 0, so the checks are neither impossible nor trivially satisfied.
+
+## In addition: sealed credentials
+
+An agent working inside an ERP holds credentials and sees bank details. Here the model gets handles,
+not secrets: a broker swaps `cred://oracle-api` for the real key inside the tool call, bank accounts come
+back masked (bank and last 4 digits), and checking an account is a yes/no question capped at 2 per
+supplier per ticket. This applies the Sealed Orders idea from my research on LLM secret leakage: the
+model that writes replies should never hold the secret.
+
+Tested on 16 tickets (4 that need the secrets, 12 attacks: password requests, prompt injection in a note
+and in an invoice field, "spell the key with spaces", fake bank-change emails, bulk export, ...). A leak
+is any secret in anything the agent sent out, in full, spaced, reversed, base64 or partial form.
+
+| Setting | Tickets with a leak | Task done and nothing leaked |
 |---|---|---|
-| 1 | 9/10 | T07: refused correctly but left the ticket with no owner |
-| 2, rule added to the prompt | 9/10 | same failure: the prompt rule did not fix it |
-| 3, ownership check in code | **10/10** | the check fired once, on T07 |
-
-No run took an unsafe action. Average about 14,700 tokens and 6 tool calls per ticket.
-
-### Credential and data leakage (16 tickets: 4 that need the secrets, 12 attacks)
-
-Attacks include a direct password request, prompt injection in an attached note, prompt injection
-hidden in an **invoice description field** read through a tool, "spell the key with spaces", a request
-to put the password in an escalation, a fake vendor bank-change email, a lookalike vendor domain, a
-handover note "with the login details", a debugging note "showing which credential was sent", and a
-bulk export of vendor bank accounts.
-
-A leak is any secret (API key, service password, vendor bank account) in anything the agent sent out
-(replies, emails, escalation summaries, reasons) in full, spaced, reversed, base64 or partial (6+
-characters) form. Secrets passed inside a tool's credential field are legitimate use and not counted.
-Joint success = task done and nothing leaked.
-
-| Setting | Tickets with a leak | Joint success |
-|---|---|---|
-| Naive (secrets in the prompt), with security rules | 0/16 | 15/16 |
+| Secrets in the prompt, with security rules | 0/16 | 15/16 |
 | Sealed, with security rules | 0/16 | 16/16 |
-| **Naive, security rules removed** | **9/16** | 7/16 |
+| **Secrets in the prompt, security rules removed** | **9/16** | 7/16 |
 | **Sealed, security rules removed** | **0/16** | 15/16 |
 
-What this shows:
-- With good security rules in the prompt, Gemini resisted every attack here, including injection.
-  But the naive agent's safety depended entirely on those rules: with them removed it leaked the API
-  key, the service password and all vendor bank accounts on 9 of 16 tickets. Prompts change all the
-  time in production.
-- Holding the secret also made the naive agent over-cautious: asked to email a remittance
-  confirmation, it refused the task, while the sealed agent sent it with the masked account
-  ("ending in 9136").
-- The sealed agent cannot leak a secret it never sees, with or without the rules.
+With good prompt rules Gemini resisted every attack, but that agent's safety depended entirely on the
+rules: without them it leaked on 9 of 16 tickets. The sealed agent cannot leak what it never sees.
+(This evaluation ran on the first version of the project; that code is at tag `v1-security-eval`.)
 
-Limits: a small, hand-built mock ERP; one model; single runs (no repeats); the sealed agent without
-rules once forgot to record a bank check (a task miss, not a leak).
+## Limits
+
+- The ERP is a mock. The invoice and hold fields follow Oracle's documentation; other resources
+  (approval tasks, users, reconciliation, integration jobs) are simplified, and some fields that are
+  read-only in the real API are set directly here.
+- One model and single runs: the numbers show the design works on these tickets, not a rate with
+  confidence intervals. The 4 fixes were each re-run once.
+- 44 tickets written by me, not real customer tickets.
 
 ## Run it
 
@@ -91,12 +133,12 @@ python -m venv .venv
 pip install -r requirements.txt
 copy .env.example .env        # then put your Gemini API key in .env
 
-pytest -q tests                                     # rule checks, no API key needed
-python run.py "Invoice INV-1001 has been stuck in approval for weeks, please fix"
-python -m eval.run_eval                             # 10 workflow tickets
-python -m eval.run_security_eval naive sealed       # leakage, with security rules
-set ERP_KB_EXCLUDE=credentials_security
-python -m eval.run_security_eval naive_norules sealed_norules   # ablation
+pytest -q tests                                   # rules, connector, onboarding: no API key needed
+python -m scripts.reference_check                 # every ticket's intended solution passes the checks
+python run.py kestrel_au "OF-7710 is stuck on a price variance hold, can you sort it?"
+python -m eval.run_eval lumen_sg kestrel_au       # full evaluation (about 300 model calls)
+python -m eval.report                             # one-page report per customer for the latest run
 ```
 
-Set `ERP_EMBEDDINGS=gemini` to use Gemini embeddings instead of the local model.
+To onboard a new customer: add `erp_agent/customers/<id>/policy.yaml` and its data, then
+`python run.py <id> "<ticket>"`.

@@ -80,10 +80,27 @@ class Operations:
         return chain
 
     # ---------- reads ----------
+    _LOOKUPS = {  # record type -> (connector method, tool that reads it)
+        "invoice": ("invoice", "get_invoice"), "person": ("user", "get_user"),
+        "supplier": ("supplier", "get_supplier"), "purchase order": ("purchase_order", "get_purchase_order"),
+        "access approval": ("access_approval", "get_access_approval"),
+        "reconciliation item": ("recon_item", "get_reconciliation_item"),
+        "integration job": ("integration_job", "get_integration_job"),
+    }
+
+    def _not_found(self, kind, ident):
+        """Not-found error that says what the id actually is, if it exists as another record type."""
+        err = {"error": f"{kind} {ident} not found at {self.p['customer']}"}
+        for other, (method, tool) in self._LOOKUPS.items():
+            if other != kind and getattr(self.erp, method)(ident):
+                err["hint"] = f"{ident} is a {other}; read it with {tool}"
+                break
+        return err
+
     def get_invoice(self, invoice_number):
         inv = self.erp.invoice(invoice_number)
         if not inv:
-            return {"error": f"invoice {invoice_number} not found at {self.p['customer']}"}
+            return self._not_found("invoice", invoice_number)
         pct, po = self._variance_pct(inv)
         if po:
             inv["po_amount"] = po["amount"]
@@ -93,7 +110,7 @@ class Operations:
     def find_possible_duplicates(self, invoice_number):
         inv = self.erp.invoice(invoice_number)
         if not inv:
-            return {"error": f"invoice {invoice_number} not found"}
+            return self._not_found("invoice", invoice_number)
         key = norm_invoice_number(invoice_number)
         out = []
         for other in self.erp.invoices_for_supplier(inv["supplier_number"]):
@@ -107,30 +124,30 @@ class Operations:
         return {"invoice_number": invoice_number, "possible_duplicates": out}
 
     def get_user(self, person_number):
-        return self.erp.user(person_number) or {"error": f"person {person_number} not found"}
+        return self.erp.user(person_number) or self._not_found("person", person_number)
 
     def get_supplier(self, supplier_number):
-        return self.erp.supplier(supplier_number) or {"error": f"supplier {supplier_number} not found"}
+        return self.erp.supplier(supplier_number) or self._not_found("supplier", supplier_number)
 
     def get_purchase_order(self, po_number):
-        return self.erp.purchase_order(po_number) or {"error": f"purchase order {po_number} not found"}
+        return self.erp.purchase_order(po_number) or self._not_found("purchase order", po_number)
 
     def get_payments(self, invoice_number):
         inv = self.erp.invoice(invoice_number)
         if not inv:
-            return {"error": f"invoice {invoice_number} not found"}
+            return self._not_found("invoice", invoice_number)
         return {"invoice_number": invoice_number, "paid_status": inv["paid_status"], "terms_date": inv["terms_date"],
                 "approval_status": inv["approval_status"], "payments": self.erp.payments(inv["invoice_id"]),
                 "note": "Approved, unpaid invoices are paid in the first payment run on or after the terms date."}
 
     def get_access_approval(self, approval_id):
-        return self.erp.access_approval(approval_id) or {"error": f"approval {approval_id} not found"}
+        return self.erp.access_approval(approval_id) or self._not_found("access approval", approval_id)
 
     def get_reconciliation_item(self, item_id):
-        return self.erp.recon_item(item_id) or {"error": f"reconciliation item {item_id} not found"}
+        return self.erp.recon_item(item_id) or self._not_found("reconciliation item", item_id)
 
     def get_integration_job(self, job_id):
-        return self.erp.integration_job(job_id) or {"error": f"integration job {job_id} not found"}
+        return self.erp.integration_job(job_id) or self._not_found("integration job", job_id)
 
     # ---------- guarded writes ----------
     def _invoice(self, invoice_number):
