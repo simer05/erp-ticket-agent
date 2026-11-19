@@ -43,8 +43,7 @@ Four tickets failed on the first run:
 - **L12.** The agent's answer was right, but my grader only accepted the date as 2026-11-28. I fixed the
   grader.
 
-After the fixes I re-ran these four and they passed. The other 40 were not re-run. The two agent
-mistakes were both missed steps, so I made the steps required in code instead of adding to the prompt.
+After the fixes I re-ran these four and they passed.
 
 Customer reports and the trace of every ticket are in [results/v2](results/v2).
 
@@ -79,8 +78,8 @@ sealed one on none. This test ran on the first version of the project (tag `v1-s
 
 - The ERP is a mock. Invoice and hold fields follow Oracle's documentation; approval tasks, users,
   reconciliation and integration jobs are simplified.
-- I wrote the tickets myself, and each ran once with one model, so the numbers are not rates with
-  error bars.
+- I wrote the tickets myself and used one model. Each ticket ran once (the four above twice), so the
+  numbers are not rates with error bars.
 
 ## Running it
 
