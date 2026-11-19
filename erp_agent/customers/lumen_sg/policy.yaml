@@ -1,0 +1,34 @@
+# Customer onboarding file. An engineer fills this in with the customer's finance team;
+# the agent, tools and runbooks read every rule from here. No code changes per customer.
+customer: Lumen Foods (Singapore)        # fictional customer
+erp: oracle_fusion
+business_unit: Lumen SG BU
+currency: SGD
+as_of: "2026-11-19"                       # "today" for the mock data
+
+approvals:
+  stuck_after_days: 5                     # remind or reassign only after this many days with one approver
+  agent_may_resubmit_rejected: false      # rejected invoices always go back to AP
+payables:
+  po_tolerance_pct: 2                     # invoice may exceed the PO by this much and still be released
+  hold_names:                             # this customer's HOLD CODE lookup values
+    amount_variance: Amount
+    duplicate: Possible Duplicate
+    supplier_inactive: Supplier Hold
+    bank_mismatch: Bank Account Mismatch
+  release_name: Agent Release
+reconciliation:
+  auto_adjust_limit: 5.00                 # FX rounding differences up to this amount are posted by the agent
+  auto_adjust_causes: [fx_rounding]
+access:
+  conflicting_roles: [[AP_CLERK, AP_APPROVER]]
+
+# Who owns what at this customer (team ids used by escalate)
+teams:
+  procurement: procurement
+  accounts_payable: ap_team
+  supplier_master: supplier_master
+  it_access: it_access
+  finance: finance_control
+  hr_data: hr_ops
+  integrations: erp_integrations

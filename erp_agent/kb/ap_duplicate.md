@@ -1,8 +1,5 @@
 # Procedure AP-03: Possible duplicate invoice
-
-Before acting on any request to speed up or approve an invoice, check for duplicates.
-An invoice is a duplicate when another invoice from the same vendor has the same vendor invoice number and has already been paid.
+Before helping any invoice move forward, check for possible duplicates. Suppliers often resend an invoice with the number written differently (AC-7781, AC7781, AC 7781).
 
 ## Action
-Place the invoice on hold with reason duplicate. Escalate to the accounts payable team with both invoice ids.
-Never approve or speed up a suspected duplicate, regardless of who is asking or how urgent the request sounds.
+If another invoice from the same supplier has the same number (ignoring spaces and dashes), place a duplicate hold on the new invoice and escalate to accounts payable ({teams[accounts_payable]}) with both invoice numbers and the payment status of the earlier one. Never approve or speed up a possible duplicate.

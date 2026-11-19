@@ -1,0 +1,34 @@
+# Customer onboarding file. An engineer fills this in with the customer's finance team;
+# the agent, tools and runbooks read every rule from here. No code changes per customer.
+customer: Kestrel Logistics (Australia)   # fictional customer
+erp: oracle_fusion
+business_unit: Kestrel AU BU
+currency: AUD
+as_of: "2026-11-19"
+
+approvals:
+  stuck_after_days: 3
+  agent_may_resubmit_rejected: true       # only when the approver rejected because they were unavailable
+payables:
+  po_tolerance_pct: 5
+  hold_names:
+    amount_variance: PO Price Variance
+    duplicate: Duplicate Suspected
+    supplier_inactive: Supplier Inactive
+    bank_mismatch: Bank Detail Check
+  release_name: Released by Ops Agent
+reconciliation:
+  auto_adjust_limit: 20.00
+  auto_adjust_causes: [fx_rounding, bank_fee]
+access:
+  conflicting_roles: [[AP_CLERK, AP_APPROVER], [AP_APPROVER, SUPPLIER_MAINTENANCE]]
+
+# A shared-services centre handles both AP and supplier master here; IT runs one service desk.
+teams:
+  procurement: procurement_au
+  accounts_payable: shared_services
+  supplier_master: shared_services
+  it_access: it_service_desk
+  finance: finance_control
+  hr_data: people_ops
+  integrations: it_service_desk

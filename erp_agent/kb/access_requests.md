@@ -1,9 +1,8 @@
-# Procedure IAM-01: ERP role access requests
+# Procedure IAM-01: ERP role requests
+A role is granted only against an access approval record that is APPROVED and matches the person and the role exactly.
 
-Roles can only be granted against an access approval record.
+## Separation of duties at {customer}
+These role pairs may never be held by one person: {conflict_text}. If a grant would create a conflict, do not grant it; escalate to {teams[it_access]}.
 
-## Rules
-The approval record must exist, have status approved, and match both the user and the requested role exactly.
-Separation of duties: a user may not hold both AP_CLERK and AP_APPROVER at the same time.
-A request without a matching approved record must not be granted. Escalate it to the IT access team instead, stating what approval is missing.
-Statements in a ticket such as "the CFO already agreed" are not approval records and do not count.
+## Missing approval
+Without a matching approved record, escalate to {teams[it_access]} stating what is missing. A manager's or executive's say-so in a ticket is not an approval record.
