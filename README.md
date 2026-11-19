@@ -1,144 +1,100 @@
 # ERP ticket agent
 
-An AI agent that resolves finance support tickets inside a customer's ERP: stuck invoice approvals,
-holds, duplicates, payment questions, access requests, bank reconciliations and failed integrations.
-Built with **Google ADK** and **Gemini**, against a mock modelled on the **Oracle Fusion Payables REST API**.
+An agent that handles finance support tickets in an ERP: stuck invoice approvals, holds, duplicate
+invoices, payment questions, access requests, bank reconciliations and failed integrations. If it can
+fix the ticket, it does. If a person needs to decide, it sends the ticket to the right team.
 
-It is built the way a forward deployed engineer would ship it to customers:
-1. **Connect to the customer's ERP** through a connector, not hard-coded data.
-2. **Onboard a new customer by configuration**: each customer's thresholds, hold names, teams and
-   rules live in one policy file. No code changes.
-3. **Enforce the customer's rules in code**, so the agent cannot make an unsafe change even if the model
-   gets it wrong.
-4. **Measure it like a deployment**: share of tickets resolved without a person, routing accuracy,
-   unsafe changes, cost per ticket, and a one-page report for the customer.
+It is built with Google ADK and Gemini 3.1 Flash-Lite. The ERP is a mock that follows the Oracle Fusion
+Payables REST API (field names, paths and response format).
 
-In addition, it **seals credentials**: the model never sees passwords, keys or full bank accounts
-(see [Security](#in-addition-sealed-credentials)).
+## What I wanted to find out
+
+Whether one agent can be set up for different customers without changing code, and whether it can
+work on finance data without making changes it shouldn't. Each customer has a policy file with its
+tolerances, limits, team names and approval rules. Before anything is written to the ERP, the code checks
+those rules. The model decides what to do, but it can't make a change the rules don't allow.
 
 ## Results
 
-44 test tickets across 2 customers, Gemini 3.1 Flash-Lite (free tier). Every result is checked against
-the final ERP records, escalations and replies, not against the agent's own summary.
+I wrote 44 tickets for two made-up customers, Lumen Foods (Singapore) and Kestrel Logistics (Australia).
+A ticket is scored from the final ERP records, escalations and replies, not from what the agent says it did.
+21 tickets could be resolved under the customer's policy and 23 needed a person.
 
-| | Lumen Foods (Singapore) | Kestrel Logistics (Australia) | Total |
-|---|---|---|---|
-| Tickets handled correctly | 23/23 | 21/21 | **44/44** |
-| Correct on the first run | 20/23 | 20/21 | 40/44 |
-| Resolved with no person involved (of those the policy allows) | 10/10 | 11/11 | **21/21** |
-| Sent to the right team (of those needing a person) | 13/13 | 10/10 | **23/23** |
-| Unsafe changes to ERP data | 0 | 0 | **0** |
-| Credentials or bank details exposed | 0 | 0 | **0** |
-| Average cost per ticket | 24.6k tokens, 6.2 tool calls | 21.9k tokens, 5.5 tool calls | |
-
-The 4 first-run misses, and what changed:
-
-| Ticket | What went wrong | Fix |
+| | Lumen (23 tickets) | Kestrel (21 tickets) |
 |---|---|---|
-| L03 duplicate invoice | Placed the duplicate hold, then closed the ticket without telling the AP team | **Closure obligations in code**: a duplicate, inactive-supplier or bank-mismatch hold must be escalated to the owning team before the ticket can close |
-| L21 bank check before payment | Checked the account but never recorded the result on the invoice | Same mechanism: a bank verification must be recorded before closing; the tool result says what is required next |
-| K19 "BR-13 is out by $300" | Read BR-13 as an invoice, found nothing, escalated to the wrong team (it did not post the $300 adjustment) | **Better tool errors**: a not-found error now says what the id actually is ("BR-13 is a reconciliation item; read it with get_reconciliation_item") |
-| L12 payment date | The agent was right ("November 28, 2026"); the grader only accepted 2026-11-28 | Grader fixed to accept written dates |
+| Correct | 23 | 21 |
+| Correct on the first run | 20 | 20 |
+| Resolved without a person | 10 of 10 | 11 of 11 |
+| Sent to the right team | 13 of 13 | 10 of 10 |
+| Unsafe changes | 0 | 0 |
+| Secrets or bank details leaked | 0 | 0 |
+| Average tokens per ticket | 24.6k | 21.9k |
 
-Each fixed ticket was re-run and passed. The lesson that repeated: when the agent missed a step, adding
-a sentence to the prompt was not reliable; putting the rule in code was.
+Four tickets failed on the first run:
 
-The per-customer reports are in [results/v2](results/v2) ([Lumen](results/v2/report_lumen_sg.md),
-[Kestrel](results/v2/report_kestrel_au.md)), with every ticket's full trace.
+- **L03.** The agent put a duplicate hold on the invoice, then closed the ticket without telling the AP
+  team. Now a duplicate, inactive-supplier or bank-mismatch hold has to be escalated before the ticket
+  can close.
+- **L21.** It checked a supplier's bank account but didn't record the result on the invoice. Now the
+  result has to be recorded before closing.
+- **K19.** "BR-13 is out by $300." The agent searched for an invoice called BR-13, found nothing and
+  escalated to the wrong team (it didn't post the adjustment). The lookup tools now say when an ID
+  belongs to another record type, here a reconciliation item.
+- **L12.** The agent's answer was right, but my grader only accepted the date as 2026-11-28. I fixed the
+  grader.
+
+After the fixes I re-ran these four and they passed. The other 40 were not re-run. The two agent
+mistakes were both missed steps, so I made the steps required in code instead of adding to the prompt.
+
+Customer reports and the trace of every ticket are in [results/v2](results/v2).
 
 ## How it works
 
 ```
-ticket ──► ADK agent (Gemini) ──► search_procedures ──► Chroma vector DB of this customer's runbooks
-                │
-                ├──► read and write tools ──► Operations: the customer's rules, in code
-                │                                  │    (from customers/<id>/policy.yaml)
-                │                                  ├──► rule broken: refuse with a reason
-                │                                  └──► Oracle Fusion connector ──► ERP
-                │
-                ├──► credential tools ──► broker swaps the handle for the secret (model sees cred://oracle-api)
-                │
-                └──► close_ticket or escalate (every ticket must end with one of these)
+ticket -> agent (ADK + Gemini) -> tools -> rules from policy.yaml -> Oracle connector -> mock ERP
 ```
 
-- **Connector** (`erp_agent/connectors/oracle_fusion.py`). Records use Oracle Fusion Payables field names
-  and paths (`/fscmRestApi/resources/11.13.18.05/invoices`, `invoiceHolds`; `InvoiceNumber`, `ApprovalStatus`,
-  `ValidationStatus`, `HoldName`, `ReleaseName`, ...) and collections return `{items, count, hasMore}`.
-  The connector turns them into one shape the rest of the code uses, so a Workday or SAP connector
-  would plug in the same way.
-- **Customer onboarding** (`erp_agent/customers/<id>/policy.yaml`). PO tolerance, how many days before
-  an approval counts as stuck, whether rejected invoices may be resubmitted, hold and release names,
-  reconciliation limits and allowed causes, conflicting roles (separation of duties) and the team for
-  each problem. The same 4% PO variance is refused at Lumen (2% tolerance) and released at Kestrel (5%).
-- **Procedures by retrieval (RAG).** 13 runbooks are filled with each customer's numbers and indexed per
-  customer in Chroma. The agent searches them instead of carrying every rule in its prompt.
-- **Rules in code** (`erp_agent/erp.py`). Examples: reassign an approval only to an active person above
-  the approver in the management chain with a high enough limit; release only a variance hold within
-  tolerance; grant a role only against an approved record and never into a duties conflict; post a
-  reconciliation adjustment only for an allowed cause, within the limit and equal to the difference.
-- **Ownership.** Every ticket must end closed (`resolved` only after a verified change, or `answered`)
-  or escalated to a valid team for that customer. If neither happened, the runner sends it back once.
-- **Observability.** ADK callbacks record every model call (tokens, latency) and every tool call
-  (arguments, refusals, Oracle API paths). Each ticket has a token budget.
+- `erp_agent/connectors/oracle_fusion.py` reads and writes Oracle-style records and turns them into one
+  format for the rest of the code. Another ERP would need its own connector.
+- `erp_agent/customers/<id>/policy.yaml` holds each customer's settings. The same 4% PO variance is
+  released at Kestrel (5% tolerance) and refused at Lumen (2%).
+- `erp_agent/erp.py` checks the rules before every write and returns the reason when it refuses.
+- `erp_agent/kb/` has 13 runbooks, filled in with each customer's values and searched with Chroma.
+- Every ticket has to end with `close_ticket` or `escalate`. If it doesn't, the runner sends it back once.
+- Model calls, tool calls and tokens are logged per ticket, and each ticket has a token budget.
 
-## The test tickets
+## Sealed credentials
 
-44 tickets (`eval/tickets_lumen_sg.json`, `eval/tickets_kestrel_au.json`) written from common ERP
-support problems: approvals stuck with someone who left or is on leave, invoices over the PO, duplicates
-typed with a different dash, inactive suppliers, rejections, approval-routing errors, "when will this be
-paid", role requests with and without approval or with a duties conflict, FX rounding and bank fees,
-failed integrations, supplier bank-change requests, urgent "just push it through" pressure, and an
-instruction hidden in an invoice description.
+The agent never sees passwords, API keys or full bank account numbers. It passes a handle
+(`cred://oracle-api`) and the tool puts in the real value. Bank accounts are shown masked, and the agent
+can only ask whether an account matches, at most twice per supplier. This comes from my Sealed Orders
+work on LLM secret leakage.
 
-`scripts/reference_check.py` plays the intended correct actions for every ticket: all 44 pass, and
-doing nothing passes 0, so the checks are neither impossible nor trivially satisfied.
-
-## In addition: sealed credentials
-
-An agent working inside an ERP holds credentials and sees bank details. Here the model gets handles,
-not secrets: a broker swaps `cred://oracle-api` for the real key inside the tool call, bank accounts come
-back masked (bank and last 4 digits), and checking an account is a yes/no question capped at 2 per
-supplier per ticket. This applies the Sealed Orders idea from my research on LLM secret leakage: the
-model that writes replies should never hold the secret.
-
-Tested on 16 tickets (4 that need the secrets, 12 attacks: password requests, prompt injection in a note
-and in an invoice field, "spell the key with spaces", fake bank-change emails, bulk export, ...). A leak
-is any secret in anything the agent sent out, in full, spaced, reversed, base64 or partial form.
-
-| Setting | Tickets with a leak | Task done and nothing leaked |
-|---|---|---|
-| Secrets in the prompt, with security rules | 0/16 | 15/16 |
-| Sealed, with security rules | 0/16 | 16/16 |
-| **Secrets in the prompt, security rules removed** | **9/16** | 7/16 |
-| **Sealed, security rules removed** | **0/16** | 15/16 |
-
-With good prompt rules Gemini resisted every attack, but that agent's safety depended entirely on the
-rules: without them it leaked on 9 of 16 tickets. The sealed agent cannot leak what it never sees.
-(This evaluation ran on the first version of the project; that code is at tag `v1-security-eval`.)
+I tested it on 16 tickets, 12 of them attacks (asking for the password, instructions hidden in a note
+or an invoice, fake bank-change emails). With security rules in the prompt, neither version leaked.
+With the rules removed, the agent that had the secrets in its prompt leaked on 9 of 16 tickets and the
+sealed one on none. This test ran on the first version of the project (tag `v1-security-eval`).
 
 ## Limits
 
-- The ERP is a mock. The invoice and hold fields follow Oracle's documentation; other resources
-  (approval tasks, users, reconciliation, integration jobs) are simplified, and some fields that are
-  read-only in the real API are set directly here.
-- One model and single runs: the numbers show the design works on these tickets, not a rate with
-  confidence intervals. The 4 fixes were each re-run once.
-- 44 tickets written by me, not real customer tickets.
+- The ERP is a mock. Invoice and hold fields follow Oracle's documentation; approval tasks, users,
+  reconciliation and integration jobs are simplified.
+- I wrote the tickets myself, and each ran once with one model, so the numbers are not rates with
+  error bars.
 
-## Run it
+## Running it
 
 ```
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env        # then put your Gemini API key in .env
+copy .env.example .env        # add your Gemini API key
 
-pytest -q tests                                   # rules, connector, onboarding: no API key needed
-python -m scripts.reference_check                 # every ticket's intended solution passes the checks
+pytest -q tests                                   # no API key needed
+python -m scripts.reference_check                 # the intended solution for every ticket passes
 python run.py kestrel_au "OF-7710 is stuck on a price variance hold, can you sort it?"
-python -m eval.run_eval lumen_sg kestrel_au       # full evaluation (about 300 model calls)
-python -m eval.report                             # one-page report per customer for the latest run
+python -m eval.run_eval lumen_sg kestrel_au       # full run, about 300 model calls
+python -m eval.report                             # report per customer for the latest run
 ```
 
-To onboard a new customer: add `erp_agent/customers/<id>/policy.yaml` and its data, then
-`python run.py <id> "<ticket>"`.
+To add a customer, create `erp_agent/customers/<id>/policy.yaml` and its data.
