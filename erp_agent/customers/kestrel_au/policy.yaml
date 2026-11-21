@@ -32,3 +32,9 @@ teams:
   finance: finance_control
   hr_data: people_ops
   integrations: it_service_desk
+
+# Writes requested through the MCP server that wait for a person to approve them (erp_agent/approvals.py).
+# Kestrel lets variance-hold releases within tolerance run without approval.
+mcp:
+  approval_required: [grant_role, post_adjustment, reassign_approval, resubmit_for_approval]
+  approvers: ["AP lead", "Finance controller"]   # names allowed to approve (python -m erp_agent.approvals)

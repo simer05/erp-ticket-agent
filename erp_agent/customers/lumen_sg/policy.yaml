@@ -32,3 +32,8 @@ teams:
   finance: finance_control
   hr_data: hr_ops
   integrations: erp_integrations
+
+# Writes requested through the MCP server that wait for a person to approve them (erp_agent/approvals.py).
+mcp:
+  approval_required: [grant_role, post_adjustment, release_hold, reassign_approval, resubmit_for_approval]
+  approvers: ["AP lead", "Finance controller"]   # names allowed to approve (python -m erp_agent.approvals)

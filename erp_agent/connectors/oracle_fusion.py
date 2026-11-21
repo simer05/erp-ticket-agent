@@ -19,6 +19,8 @@ import copy
 import re
 from datetime import date
 
+from ..errors import TransientERPError
+
 API = "/fscmRestApi/resources/11.13.18.05"
 
 
@@ -36,6 +38,18 @@ class MockOracleFusion:
         self.data = copy.deepcopy(data)
         self.calls = []
         self._next_id = 900000
+        self.writes = 0    # writes actually applied (tells a clean rejection from a partial one)
+        self.faults = []   # HTTP statuses the next writes fail with, e.g. [503, 429] (fault injection for tests)
+
+    def inject_faults(self, *statuses):
+        """Make the next writes fail as the ERP would when it rejects a request before applying it."""
+        self.faults.extend(statuses)
+
+    def _maybe_fail(self, method, path):
+        if self.faults:
+            status = self.faults.pop(0)
+            self.calls.append((method, path, {"rejected": status}))
+            raise TransientERPError(f"HTTP {status} from {method} {path}; nothing was applied")
 
     def _items(self, resource):
         return self.data.setdefault(resource, [])
@@ -54,6 +68,8 @@ class MockOracleFusion:
         return {"items": rows, "count": len(rows), "hasMore": False}
 
     def post(self, resource, body):
+        self._maybe_fail("POST", f"{API}/{resource}")
+        self.writes += 1
         self.calls.append(("POST", f"{API}/{resource}", body))
         k = self.KEYS[resource]
         if k not in body:
@@ -63,6 +79,8 @@ class MockOracleFusion:
         return copy.deepcopy(body)
 
     def patch(self, resource, key, body):
+        self._maybe_fail("PATCH", f"{API}/{resource}/{key}")
+        self.writes += 1
         self.calls.append(("PATCH", f"{API}/{resource}/{key}", body))
         k = self.KEYS[resource]
         for it in self._items(resource):
